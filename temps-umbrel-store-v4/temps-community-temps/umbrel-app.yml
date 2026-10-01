@@ -1,0 +1,23 @@
+manifestVersion: 1
+id: temps-community-temps
+name: Temps
+tagline: Self-hosted Vercel-style deployment platform
+description: Temps is an open-source, self-hosted deployment platform for Git-based
+  deployments, preview environments, managed services, analytics, error tracking,
+  session replay and application routing. This Umbrel package keeps the Temps dashboard
+  behind Umbrel's app proxy and exposes the deployment HTTP ingress on host port 9080
+  so it does not take over Umbrel's ports 80/443.
+category: Development
+version: 0.1.0-umbrel.4
+port: 39291
+icon: https://temps.sh/favicon.ico
+developer: Temps Contributors
+website: https://temps.sh
+repo: https://github.com/gotempsh/temps
+support: https://github.com/gotempsh/temps/issues
+releaseNotes: Fix release bootstrap URLs by escaping shell variables from Docker Compose interpolation; retains PostgreSQL and binary startup fixes.
+dependencies: []
+path: ''
+defaultUsername: admin@umbrel.local
+deterministicPassword: true
+submitter: Community
