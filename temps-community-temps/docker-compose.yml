@@ -1,213 +1,32 @@
 services:
   app_proxy:
     environment:
-      APP_HOST: temps-community-temps_server_1
-      APP_PORT: 9000
+      APP_HOST: temps-community-temps_bridge_1
+      APP_PORT: 8080
+      PROXY_AUTH_ADD: "false"
 
-  secrets-init:
-    image: alpine:3.22
-    restart: "no"
-    environment:
-      APP_PASSWORD: "${APP_PASSWORD}"
-    volumes:
-      - ${APP_DATA_DIR}/data/secrets:/secrets
-    command:
-      - /bin/sh
-      - -ec
-      - |
-        umask 077
-        mkdir -p /secrets
-        if [ ! -s /secrets/admin-password ]; then
-          printf '%s\n' "$$APP_PASSWORD" > /secrets/admin-password
-        fi
-        chmod 600 /secrets/admin-password
-
-  postgres-permissions:
+  installer:
     image: alpine:3.22
     user: "0:0"
+    privileged: true
+    pid: host
+    network_mode: host
     restart: "no"
     volumes:
-      - ${APP_DATA_DIR}/data/postgres:/data
-    command:
+      - /:/host
+      - ${APP_DATA_DIR}/data:/state
+      - ${APP_DATA_DIR}/bootstrap.sh:/bootstrap.sh:ro
+    entrypoint:
       - /bin/sh
-      - -ec
-      - |
-        mkdir -p /data
-        chown -R 1000:1000 /data
-        chmod 700 /data
+      - /bootstrap.sh
 
-  postgres:
-    image: gotempsh/timescaledb-walg:pg18
+  bridge:
+    image: nginx:1.27-alpine
     restart: unless-stopped
     depends_on:
-      postgres-permissions:
+      installer:
         condition: service_completed_successfully
-    environment:
-      POSTGRES_DB: temps
-      POSTGRES_USER: temps
-      POSTGRES_PASSWORD: "${APP_SEED}pg"
-      TIMESCALEDB_TELEMETRY: "off"
-      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
-      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
-    command: >-
-      postgres
-      -c wal_level=replica
-      -c archive_mode=on
-      -c archive_timeout=60
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
-      - ${APP_DATA_DIR}/data/postgres:/home/postgres/pgdata/data
-      - postgres_socket:/var/run/postgresql
-    healthcheck:
-      test: ["CMD-SHELL", "PGPASSWORD=\"$$POSTGRES_PASSWORD\" psql -h 127.0.0.1 -U temps -d temps -tAc 'SELECT 1' | grep -qx 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
-    networks:
-      - temps-control
-
-  postgres-credential-sync:
-    image: gotempsh/timescaledb-walg:pg18
-    restart: "no"
-    network_mode: none
-    environment:
-      POSTGRES_PASSWORD: "${APP_SEED}pg"
-    depends_on:
-      postgres:
-        condition: service_started
-    volumes:
-      - postgres_socket:/var/run/postgresql
-    command:
-      - /bin/sh
-      - -ec
-      - |
-        attempts=0
-        until psql -h /var/run/postgresql -U temps -d postgres -tAc 'SELECT 1' >/dev/null 2>&1; do
-          attempts=$$((attempts + 1))
-          if [ "$$attempts" -ge 120 ]; then
-            echo "PostgreSQL did not accept local connections within 120 seconds" >&2
-            exit 1
-          fi
-          sleep 1
-        done
-        umask 077
-        trap 'rm -f /tmp/rotate-password.sql' EXIT
-        printf "\\set password '%s'\nSET password_encryption = 'scram-sha-256';\nALTER ROLE temps WITH PASSWORD :'password';\n" "$$POSTGRES_PASSWORD" > /tmp/rotate-password.sql
-        rotate_attempts=0
-        until psql -v ON_ERROR_STOP=1 -h /var/run/postgresql -U temps -d postgres -f /tmp/rotate-password.sql; do
-          rotate_attempts=$$((rotate_attempts + 1))
-          if [ "$$rotate_attempts" -ge 120 ]; then
-            echo "PostgreSQL password synchronization did not complete within 120 seconds" >&2
-            exit 1
-          fi
-          sleep 1
-        done
-
-  clickhouse:
-    image: clickhouse/clickhouse-server:26.7.5.10-alpine
-    restart: unless-stopped
-    environment:
-      CLICKHOUSE_DB: temps
-      CLICKHOUSE_USER: temps
-      CLICKHOUSE_PASSWORD: "${APP_SEED}ch"
-    volumes:
-      - ${APP_DATA_DIR}/data/clickhouse:/var/lib/clickhouse
-    ulimits:
-      nofile:
-        soft: 262144
-        hard: 262144
-    healthcheck:
-      test: ["CMD", "clickhouse-client", "--user", "temps", "--password", "${APP_SEED}ch", "--database", "temps", "--query", "SELECT 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 30s
-    networks:
-      - temps-control
-
-  binary-init:
-    image: alpine:3.22
-    restart: "no"
-    volumes:
-      - ${APP_DATA_DIR}/data/temps-runtime:/runtime
-    command:
-      - /bin/sh
-      - -ec
-      - |
-        VERSION="v0.1.0-nightly.20260930.53d4fb40"
-        case "$(uname -m)" in
-          x86_64) ASSET="temps-linux-amd64.tar.gz" ;;
-          aarch64|arm64) ASSET="temps-linux-arm64.tar.gz" ;;
-          *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
-        esac
-        if [ ! -x /runtime/temps ] || [ ! -f /runtime/version ] || [ "$(cat /runtime/version 2>/dev/null || true)" != "$VERSION" ]; then
-          rm -rf /tmp/temps-extract /tmp/temps.tar.gz
-          mkdir -p /tmp/temps-extract /runtime
-          wget -O /tmp/temps.tar.gz "https://github.com/gotempsh/temps/releases/download/$VERSION/$ASSET"
-          tar -xzf /tmp/temps.tar.gz -C /tmp/temps-extract
-          cp /tmp/temps-extract/temps /runtime/temps
-          chmod 0755 /runtime/temps
-          printf '%s\n' "$VERSION" > /runtime/version
-        fi
-
-  server:
-    image: ghcr.io/gotempsh/temps:latest
-    user: "0:0"
-    restart: unless-stopped
-    depends_on:
-      secrets-init:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-      postgres-credential-sync:
-        condition: service_completed_successfully
-      clickhouse:
-        condition: service_healthy
-      binary-init:
-        condition: service_completed_successfully
-    environment:
-      TEMPS_EXECUTION_ENV: docker
-      TEMPS_NETWORK_NAME: temps-community-temps-workloads
-      TEMPS_DATABASE_URL: "postgresql://temps:${APP_SEED}pg@postgres:5432/temps"
-      TEMPS_ADDRESS: "0.0.0.0:3000"
-      TEMPS_CONSOLE_ADDRESS: "0.0.0.0:9000"
-      TEMPS_DATA_DIR: /app/data
-      TEMPS_ADMIN_EMAIL: "admin@umbrel.local"
-      TEMPS_ADMIN_PASSWORD_FILE: /run/temps-secrets/admin-password
-      TEMPS_LOG_LEVEL: info
-      TEMPS_CLICKHOUSE_URL: "http://clickhouse:8123"
-      TEMPS_CLICKHOUSE_DATABASE: temps
-      TEMPS_CLICKHOUSE_USER: temps
-      TEMPS_CLICKHOUSE_PASSWORD: "${APP_SEED}ch"
-      TEMPS_DISABLE_HTTPS_REDIRECT: "true"
-    entrypoint: ["/runtime/temps"]
-    command: ["serve"]
-    volumes:
-      - ${APP_DATA_DIR}/data/temps:/app/data
-      - ${APP_DATA_DIR}/data/temps-runtime:/runtime:ro
-      - ${APP_DATA_DIR}/data/secrets:/run/temps-secrets:ro
-      - /var/run/docker.sock:/var/run/docker.sock
-    ports:
-      - "9080:3000"
-      - "9081:9000"
-    healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:9000/readyz"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 60s
-    networks:
-      - default
-      - temps-control
-      - temps-workloads
-
-volumes:
-  postgres_socket:
-
-networks:
-  temps-control:
-    driver: bridge
-    internal: true
-  temps-workloads:
-    name: temps-community-temps-workloads
-    driver: bridge
+      - ${APP_DATA_DIR}/nginx.conf:/etc/nginx/nginx.conf:ro

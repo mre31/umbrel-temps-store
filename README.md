@@ -1,141 +1,108 @@
-# Temps for Umbrel — Community App Store
+# Temps for Umbrel — native host installer
 
-Unofficial Umbrel Community App Store package for [Temps](https://temps.sh/).
+This Community App Store package deliberately **does not repackage Temps into an
+Umbrel container**. The Umbrel app acts as a bootstrapper and UI bridge:
 
-## What this package does
+1. A privileged one-shot container downloads the official `https://temps.sh/deploy.sh`.
+2. It verifies the installer against the reviewed SHA-256 pinned by the upstream
+   Temps platform-setup documentation.
+3. It runs the official installer in the Umbrel host namespaces in `local` mode.
+4. Temps runs natively under `temps.service` (systemd), exactly as the upstream
+   installer expects.
+5. A systemd drop-in requests Umbrel-safe ports:
+   - `9080` — Temps HTTP/application ingress
+   - `9081` — Temps console
+6. A tiny nginx bridge lets Umbrel's `app_proxy` open the native console from the
+   Umbrel home screen.
 
-- Opens the Temps dashboard from the Umbrel home screen.
-- Keeps Umbrel's host ports 80/443 untouched.
-- Exposes Temps' deployed-app HTTP ingress on **port 9080**.
-- Exposes the Temps control plane on **port 9081** for Git-provider webhooks and optional external access.
-- Persists PostgreSQL, ClickHouse and Temps data under Umbrel's app data directory.
-- Gives Temps access to `/var/run/docker.sock` so it can build/run deployments.
-- Uses the Umbrel-generated app password as the initial Temps admin password.
+## Pinned upstream inputs
 
-## Login
+- Temps installer SHA-256:
+  `49ecd9ce4ee0d4302ae8f11cadbdaa376135800e8f59690ae79c513af762de33`
+- Temps release:
+  `v0.1.0-nightly.20260930.53d4fb40`
+- Admin email:
+  `admin@temps.local`
 
-- Username: `admin@umbrel.local`
-- Password: the deterministic app password shown by Umbrel for Temps.
+The package intentionally pins these values. If upstream changes `deploy.sh`, the
+install fails rather than executing an unreviewed replacement.
 
-## Install through Community App Stores
+## Install / update this repo
 
-1. Put the contents of this ZIP in a GitHub repository. The repository root must
-   contain `umbrel-app-store.yml` and the `temps-community-temps/` directory.
-2. In Umbrel, open **App Store → Community App Stores** and add the GitHub
-   repository URL.
-3. Refresh the store and install **Temps** from the **Temps Community App Store**.
-4. Open Temps from the Umbrel home screen and sign in.
-
-## GitHub commands
+Copy the repository contents to your existing GitHub Community App Store repo, then:
 
 ```bash
-git init
 git add .
-git commit -m "Add Temps Umbrel app"
-git branch -M main
-git remote add origin https://github.com/YOUR-USER/umbrel-temps-store.git
-git push -u origin main
+git commit -m "Use official native Temps host installer"
+git push
 ```
 
-Then add this URL in Umbrel:
+Refresh the Community App Store in Umbrel and install/update **Temps**.
+
+## First login password
+
+The official installer generates the password. It is intentionally **not copied into
+Docker logs or the Git repository**.
+
+On the Umbrel host:
+
+```bash
+sudo jq -r '.admin_password // .password // .credentials.admin_password // empty'   /root/.temps/setup-result.json
+```
+
+If that prints nothing, inspect only the available field names:
+
+```bash
+sudo jq 'keys' /root/.temps/setup-result.json
+```
+
+Then read the appropriate password field locally on the server.
+
+## Ports
+
+| Port | Purpose |
+|---|---|
+| `9080/tcp` | Temps HTTP / deployed-app ingress requested by this wrapper |
+| `9081/tcp` | Temps console requested by this wrapper |
+| `16432/tcp` | Upstream installer TimescaleDB port (normally loopback-only) |
+| `39291/tcp` | Umbrel app-proxy entry shown in the app manifest |
+
+Umbrel keeps ownership of its normal `80/443` listeners.
+
+For Cloudflare Tunnel later, route the wildcard application hostname to the Temps
+HTTP ingress (normally `http://127.0.0.1:9080` when cloudflared runs on the host).
+If cloudflared itself is a container, target the Umbrel host address instead of the
+container's own `127.0.0.1`.
+
+## Diagnostics
+
+```bash
+sudo systemctl status temps --no-pager
+sudo journalctl -u temps -n 100 --no-pager
+sudo ss -ltnp | grep -E ':9080|:9081|:3000|:16432'
+```
+
+The raw installer transcript is kept root-only at:
 
 ```text
-https://github.com/YOUR-USER/umbrel-temps-store
+/root/temps-install.log
 ```
 
-## Deployed applications
+It can contain generated credentials, so do not paste it publicly without redacting
+secrets.
 
-Temps listens for deployed application HTTP traffic on:
+## Important uninstall behavior
 
-```text
-http://UMBREL-IP:9080
-```
+Removing the Umbrel app **does not uninstall the native Temps service or delete its
+data**. This is intentional: an Umbrel UI uninstall should not silently destroy
+deployment data, databases, keys, or projects.
 
-Routing is Host-header based, so normally you should put a reverse proxy or
-Cloudflare Tunnel in front of port 9080 and send your app/preview domains to it.
-The Temps control plane is also available at `http://UMBREL-IP:9081`; expose that
-through a separate hostname if your Git provider needs to deliver webhooks. The
-package intentionally does not bind 80 or 443 because Umbrel already uses those
-ports.
+If you ever want to remove native Temps too, do that separately after backing up and
+reviewing the current upstream uninstall procedure.
 
-### Cloudflare Tunnel idea
+## Security note
 
-After Temps itself is working, configure a wildcard hostname such as
-`*.apps.example.com` in your Cloudflare setup and forward it to the Umbrel host
-on port `9080`. Also route a control-plane hostname such as `temps.example.com`
-to port `9081` for Git-provider callbacks/webhooks. Preserve the original Host
-header so Temps can select the correct project/environment.
-
-## Important security note
-
-Temps must control Docker to build and launch deployments. This package mounts
-`/var/run/docker.sock` into Temps. Docker socket access is effectively root-level
-control of the Umbrel host. Only install this package if you trust Temps and the
-images/code you deploy through it.
-
-## Updating
-
-The server container still uses the official `ghcr.io/gotempsh/temps:latest` runtime image, but this revision overrides its broken entrypoint and bootstraps the official release binary `v0.1.0-nightly.20260930.53d4fb40` into a persistent runtime directory. This makes startup deterministic until the package is intentionally updated.
-
-## Troubleshooting
-
-Check the app containers:
-
-```bash
-sudo docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}' | grep temps-community-temps
-```
-
-Temps logs:
-
-```bash
-sudo docker logs -f temps-community-temps_server_1
-```
-
-PostgreSQL logs:
-
-```bash
-sudo docker logs -f temps-community-temps_postgres_1
-```
-
-ClickHouse logs:
-
-```bash
-sudo docker logs -f temps-community-temps_clickhouse_1
-```
-
-If ports `9080` or `9081` are already occupied, change the host side of these lines in
-`temps-community-temps/docker-compose.yml`:
-
-```yaml
-ports:
-  - "9080:3000"
-  - "9081:9000"
-```
-
-For example `9180:3000` and `9181:9000`.
-
-## Status
-
-This is an unofficial community package adapted from Temps' current Docker
-architecture. It has been syntax-checked, but it has not been run on your
-specific Umbrel installation yet. Temps is under active development, so upstream
-changes can require updates to this package.
-
-## Umbrel.2 database startup fix
-
-This revision adds a one-shot permissions initializer for the TimescaleDB data
-bind mount (`1000:1000`) and the upstream-style PostgreSQL socket/password sync.
-It also removes the obsolete top-level Compose `version` field.
-
-If an older failed install left the database directory behind, this revision
-repairs its ownership automatically before PostgreSQL starts.
-
-
-## Umbrel.3 server startup fix
-
-The upstream `ghcr.io/gotempsh/temps:latest` image observed on this Umbrel host
-started with `exec /usr/local/bin/temps: no such file or directory`. This
-revision adds a one-shot `binary-init` service that downloads the matching
-official Linux release binary from the Temps GitHub release, stores it under
-Umbrel app data, and starts Temps from that mounted binary instead of the broken
-image entrypoint. Both amd64 and arm64 are handled automatically.
+The one-shot installer container is `privileged`, joins the host PID namespace, and
+mounts `/` read-write because it must run the upstream installer and manage systemd.
+Treat this package as root-equivalent. The long-running nginx bridge itself is not
+privileged.
