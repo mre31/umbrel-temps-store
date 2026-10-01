@@ -125,6 +125,31 @@ services:
     networks:
       - temps-control
 
+  binary-init:
+    image: alpine:3.22
+    restart: "no"
+    volumes:
+      - ${APP_DATA_DIR}/data/temps-runtime:/runtime
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        VERSION="v0.1.0-nightly.20260930.53d4fb40"
+        case "$(uname -m)" in
+          x86_64) ASSET="temps-linux-amd64.tar.gz" ;;
+          aarch64|arm64) ASSET="temps-linux-arm64.tar.gz" ;;
+          *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+        esac
+        if [ ! -x /runtime/temps ] || [ ! -f /runtime/version ] || [ "$(cat /runtime/version 2>/dev/null || true)" != "$VERSION" ]; then
+          rm -rf /tmp/temps-extract /tmp/temps.tar.gz
+          mkdir -p /tmp/temps-extract /runtime
+          wget -O /tmp/temps.tar.gz "https://github.com/gotempsh/temps/releases/download/$VERSION/$ASSET"
+          tar -xzf /tmp/temps.tar.gz -C /tmp/temps-extract
+          cp /tmp/temps-extract/temps /runtime/temps
+          chmod 0755 /runtime/temps
+          printf '%s\n' "$VERSION" > /runtime/version
+        fi
+
   server:
     image: ghcr.io/gotempsh/temps:latest
     user: "0:0"
@@ -138,6 +163,8 @@ services:
         condition: service_completed_successfully
       clickhouse:
         condition: service_healthy
+      binary-init:
+        condition: service_completed_successfully
     environment:
       TEMPS_EXECUTION_ENV: docker
       TEMPS_NETWORK_NAME: temps-community-temps-workloads
@@ -153,9 +180,11 @@ services:
       TEMPS_CLICKHOUSE_USER: temps
       TEMPS_CLICKHOUSE_PASSWORD: "${APP_SEED}ch"
       TEMPS_DISABLE_HTTPS_REDIRECT: "true"
-    command: ["serve", "--disable-https-redirect"]
+    entrypoint: ["/runtime/temps"]
+    command: ["serve"]
     volumes:
       - ${APP_DATA_DIR}/data/temps:/app/data
+      - ${APP_DATA_DIR}/data/temps-runtime:/runtime:ro
       - ${APP_DATA_DIR}/data/secrets:/run/temps-secrets:ro
       - /var/run/docker.sock:/var/run/docker.sock
     ports:

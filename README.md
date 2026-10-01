@@ -75,15 +75,7 @@ images/code you deploy through it.
 
 ## Updating
 
-The compose file currently uses:
-
-```text
-ghcr.io/gotempsh/temps:latest
-```
-
-Restarting after a pull can therefore move to a newer Temps build. For a more
-conservative setup, replace `latest` with a specific Temps release tag before
-publishing your Community App Store repository.
+The server container still uses the official `ghcr.io/gotempsh/temps:latest` runtime image, but this revision overrides its broken entrypoint and bootstraps the official release binary `v0.1.0-nightly.20260930.53d4fb40` into a persistent runtime directory. This makes startup deterministic until the package is intentionally updated.
 
 ## Troubleshooting
 
@@ -137,3 +129,13 @@ It also removes the obsolete top-level Compose `version` field.
 
 If an older failed install left the database directory behind, this revision
 repairs its ownership automatically before PostgreSQL starts.
+
+
+## Umbrel.3 server startup fix
+
+The upstream `ghcr.io/gotempsh/temps:latest` image observed on this Umbrel host
+started with `exec /usr/local/bin/temps: no such file or directory`. This
+revision adds a one-shot `binary-init` service that downloads the matching
+official Linux release binary from the Temps GitHub release, stores it under
+Umbrel app data, and starts Temps from that mounted binary instead of the broken
+image entrypoint. Both amd64 and arm64 are handled automatically.
