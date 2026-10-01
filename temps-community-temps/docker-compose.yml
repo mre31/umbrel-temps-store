@@ -1,11 +1,8 @@
-version: "3.7"
-
 services:
   app_proxy:
     environment:
       APP_HOST: temps-community-temps_server_1
       APP_PORT: 9000
-      # Temps has its own login. Umbrel auth stays enabled as an additional layer.
 
   secrets-init:
     image: alpine:3.22
@@ -25,9 +22,26 @@ services:
         fi
         chmod 600 /secrets/admin-password
 
+  postgres-permissions:
+    image: alpine:3.22
+    user: "0:0"
+    restart: "no"
+    volumes:
+      - ${APP_DATA_DIR}/data/postgres:/data
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        mkdir -p /data
+        chown -R 1000:1000 /data
+        chmod 700 /data
+
   postgres:
     image: gotempsh/timescaledb-walg:pg18
     restart: unless-stopped
+    depends_on:
+      postgres-permissions:
+        condition: service_completed_successfully
     environment:
       POSTGRES_DB: temps
       POSTGRES_USER: temps
@@ -42,14 +56,52 @@ services:
       -c archive_timeout=60
     volumes:
       - ${APP_DATA_DIR}/data/postgres:/home/postgres/pgdata/data
+      - postgres_socket:/var/run/postgresql
     healthcheck:
-      test: ["CMD-SHELL", "PGPASSWORD='${APP_SEED}pg' psql -h 127.0.0.1 -U temps -d temps -tAc 'SELECT 1' | grep -qx 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
+      test: ["CMD-SHELL", "PGPASSWORD=\"$$POSTGRES_PASSWORD\" psql -h 127.0.0.1 -U temps -d temps -tAc 'SELECT 1' | grep -qx 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
       start_period: 30s
     networks:
       - temps-control
+
+  postgres-credential-sync:
+    image: gotempsh/timescaledb-walg:pg18
+    restart: "no"
+    network_mode: none
+    environment:
+      POSTGRES_PASSWORD: "${APP_SEED}pg"
+    depends_on:
+      postgres:
+        condition: service_started
+    volumes:
+      - postgres_socket:/var/run/postgresql
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        attempts=0
+        until psql -h /var/run/postgresql -U temps -d postgres -tAc 'SELECT 1' >/dev/null 2>&1; do
+          attempts=$$((attempts + 1))
+          if [ "$$attempts" -ge 120 ]; then
+            echo "PostgreSQL did not accept local connections within 120 seconds" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+        umask 077
+        trap 'rm -f /tmp/rotate-password.sql' EXIT
+        printf "\\set password '%s'\nSET password_encryption = 'scram-sha-256';\nALTER ROLE temps WITH PASSWORD :'password';\n" "$$POSTGRES_PASSWORD" > /tmp/rotate-password.sql
+        rotate_attempts=0
+        until psql -v ON_ERROR_STOP=1 -h /var/run/postgresql -U temps -d postgres -f /tmp/rotate-password.sql; do
+          rotate_attempts=$$((rotate_attempts + 1))
+          if [ "$$rotate_attempts" -ge 120 ]; then
+            echo "PostgreSQL password synchronization did not complete within 120 seconds" >&2
+            exit 1
+          fi
+          sleep 1
+        done
 
   clickhouse:
     image: clickhouse/clickhouse-server:26.7.5.10-alpine
@@ -75,9 +127,6 @@ services:
 
   server:
     image: ghcr.io/gotempsh/temps:latest
-    # Temps needs access to the host Docker daemon to build and run deployments.
-    # Docker socket access is already root-equivalent; running as root avoids a
-    # host-specific docker.sock group-ID dependency on Umbrel.
     user: "0:0"
     restart: unless-stopped
     depends_on:
@@ -85,6 +134,8 @@ services:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
+      postgres-credential-sync:
+        condition: service_completed_successfully
       clickhouse:
         condition: service_healthy
     environment:
@@ -107,7 +158,6 @@ services:
       - ${APP_DATA_DIR}/data/temps:/app/data
       - ${APP_DATA_DIR}/data/secrets:/run/temps-secrets:ro
       - /var/run/docker.sock:/var/run/docker.sock
-    # Public HTTP ingress for deployed apps. Keep 80/443 free for Umbrel.
     ports:
       - "9080:3000"
       - "9081:9000"
@@ -121,6 +171,9 @@ services:
       - default
       - temps-control
       - temps-workloads
+
+volumes:
+  postgres_socket:
 
 networks:
   temps-control:

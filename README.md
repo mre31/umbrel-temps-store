@@ -128,3 +128,12 @@ This is an unofficial community package adapted from Temps' current Docker
 architecture. It has been syntax-checked, but it has not been run on your
 specific Umbrel installation yet. Temps is under active development, so upstream
 changes can require updates to this package.
+
+## Umbrel.2 database startup fix
+
+This revision adds a one-shot permissions initializer for the TimescaleDB data
+bind mount (`1000:1000`) and the upstream-style PostgreSQL socket/password sync.
+It also removes the obsolete top-level Compose `version` field.
+
+If an older failed install left the database directory behind, this revision
+repairs its ownership automatically before PostgreSQL starts.
